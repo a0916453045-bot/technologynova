@@ -88,19 +88,54 @@ Sitemap: {base_url}sitemap.xml
 """
 (ROOT / "robots.txt").write_text(robots, encoding="utf-8")
 
-# sitemap.xml
-urls = [base_url]
+# sitemap.xml (with lastmod)
+url_rows = [(base_url, datetime.now().strftime("%Y-%m-%d"))]
 for p in POSTS:
     pid = p["id"]
-    urls.append(f"{base_url}p/{pid}/")
+    lastmod = p.get("date") or datetime.now().strftime("%Y-%m-%d")
+    url_rows.append((f"{base_url}p/{pid}/", lastmod))
 
-sitemap_entries = "\n".join([f"  <url><loc>{u}</loc></url>" for u in sorted(set(urls))])
+# stable + unique
+seen = set()
+entries = []
+for u, lm in sorted(url_rows, key=lambda x: x[0]):
+    if u in seen:
+        continue
+    seen.add(u)
+    entries.append(f"  <url><loc>{u}</loc><lastmod>{lm}</lastmod></url>")
+
 sitemap = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">
-{sitemap_entries}
-</urlset>
-"""
+""" + "\n".join(entries) + "\n</urlset>\n"
 (ROOT / "sitemap.xml").write_text(sitemap, encoding="utf-8")
+
+# feed.xml (RSS)
+items = []
+for p in posts_sorted[:50]:
+    pid = p["id"]
+    title = p.get("title", "")
+    link = f"{base_url}p/{pid}/"
+    pub_date = p.get("date", "")
+    # RFC 2822-ish; keep simple (00:00 GMT)
+    pub_rfc = f"{pub_date} 00:00:00 GMT" if pub_date else ""
+    items.append(
+        f"<item><title><![CDATA[{title}]]></title><link>{link}</link><guid>{link}</guid>" +
+        (f"<pubDate>{pub_rfc}</pubDate>" if pub_rfc else "") +
+        f"<description><![CDATA[中文摘要页（回链 TechNova 原文）。]]></description></item>"
+    )
+
+feed = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<rss version=\"2.0\">
+<channel>
+  <title><![CDATA[{site_name}]]></title>
+  <link>{base_url}</link>
+  <description><![CDATA[TechNova 文章的中文摘要索引（每日更新）。]]></description>
+  <language>zh-Hans</language>
+  {''.join(items)}
+</channel>
+</rss>
+"""
+(ROOT / "feed.xml").write_text(feed, encoding="utf-8")
 
 # touch updated_at
 SITE["updated_at"] = datetime.now().strftime("%Y-%m-%d")
