@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>影子撮合引擎：模拟交易的高保真实现要点（摘要） | TechNova</title>
+  <meta name="description" content="模拟交易想做得像真的，关键不在 UI，而在撮合与风控链路是否‘可重放、可对齐、可解释’。本文为 TechNova 原文的中文摘要与工程要点整理，并回链原文。" />
+  <link rel="canonical" href="https://technologynova.org/%e6%b7%b1%e5%ba%a6%e5%89%96%e6%9e%90%ef%bc%9a%e5%a6%82%e4%bd%95%e8%ae%be%e8%ae%a1%e6%94%af%e6%8c%81%e6%a8%a1%e6%8b%9f%e4%ba%a4%e6%98%93%e7%9a%84%e9%ab%98%e4%bf%9d%e7%9c%9f%e5%bd%b1%e5%ad%90%e6%92%ae/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-04 · <span class="badge">0001</span></p>
+      <h1 class="brand" style="margin-top:8px">影子撮合引擎：模拟交易的高保真实现要点（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e6%b7%b1%e5%ba%a6%e5%89%96%e6%9e%90%ef%bc%9a%e5%a6%82%e4%bd%95%e8%ae%be%e8%ae%a1%e6%94%af%e6%8c%81%e6%a8%a1%e6%8b%9f%e4%ba%a4%e6%98%93%e7%9a%84%e9%ab%98%e4%bf%9d%e7%9c%9f%e5%bd%b1%e5%ad%90%e6%92%ae/">深度剖析：如何设计支持模拟交易的高保真影子撮合引擎</a>
+      </p>
+      <p class="sub">承接页（交易系统解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li><b>影子撮合的目标不是“跑得像真的”</b>，而是做到：状态演进一致、撮合结果可解释、全链路可回放与对账。</li>
+        <li>高保真模拟的核心在于<b>事件与时间</b>：统一的事件序列、确定性撮合、可控的时间推进（而不是“拿历史K线随便喂”）。</li>
+        <li>工程上要把“模拟”当成一条独立产品线：隔离资金/风控/撮合状态，和实盘共享框架但不共享状态。</li>
+      </ul>
+    </div>
+
+    <h2>1. 为什么需要“影子撮合引擎”</h2>
+    <p>
+      许多平台的“模拟交易”本质是一个报价驱动的下单/成交假象：价格来自行情，成交来自简单撮合或直接成交。
+      这类实现对新手体验足够，但对严肃的策略验证、撮合/风控联调、交易链路压测几乎没有价值。
+    </p>
+    <p>
+      影子撮合引擎（Shadow Matching Engine）的定位是：<b>用接近实盘的撮合、风控、清算语义</b>来驱动模拟账户，使模拟环境能承载更真实的失败模式（滑点、部分成交、拒单、排队延迟、撮合优先级等）。
+    </p>
+
+    <h2>2. 高保真模拟的关键设计点（工程可落地）</h2>
+    <div class="card">
+      <ol class="list">
+        <li><b>确定性（Determinism）</b>：同一输入事件序列必须得到同一撮合结果；否则回放/复现/对账都会崩。</li>
+        <li><b>事件溯源 + 回放</b>：把“下单/撤单/行情/风控触发/成交回报”统一成事件流，支持按序重放与快照恢复。</li>
+        <li><b>可控时间推进</b>：模拟系统要有自己的“逻辑时钟”（撮合按事件时间或撮合时间推进），避免真实墙钟导致不可复现。</li>
+        <li><b>隔离但复用</b>：尽量复用实盘的撮合/风控代码路径，但必须隔离账户资金、仓位、订单簿状态，避免污染与安全风险。</li>
+        <li><b>对齐真实撮合语义</b>：部分成交、剩余挂单、优先级（价格/时间/用户等级）都要与实盘一致，才有验证意义。</li>
+        <li><b>可解释与可观测</b>：每笔成交/拒单都能追溯到规则与参数（为什么拒？为什么这单先成交？），否则只是在“跑黑盒”。</li>
+      </ol>
+    </div>
+
+    <h2>3. 常见坑：模拟反而把策略带沟里</h2>
+    <ul class="list">
+      <li><b>忽略撮合队列</b>：把成交当作“立即成交”，会系统性高估策略收益。</li>
+      <li><b>忽略风控链路</b>：实盘拒单/限频/保证金不足在模拟里不存在，策略上线后才暴雷。</li>
+      <li><b>行情与撮合时序不一致</b>：事件顺序混乱导致“看起来能赚钱”，实际只是时序穿越。</li>
+    </ul>
+
+    <h2>4. 适合哪些团队/场景</h2>
+    <div class="card">
+      <ul class="list">
+        <li>交易所/券商/机构：需要模拟环境做联调、压测、演练、风控规则验证。</li>
+        <li>量化团队：需要更接近真实撮合与成交语义的策略评估环境。</li>
+        <li>做市/高频：对撮合队列、优先级、部分成交、延迟模型敏感，必须用高保真模拟。</li>
+      </ul>
+    </div>
+
+    <hr />
+    <div class="card">
+      <div class="meta">延伸阅读 / 合作</div>
+      <p>
+        如果你正在规划撮合引擎、风控、清结算、账户体系等核心模块的落地，可以参考 TechNova 的交易系统整体解决方案：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接（建议收藏）：<br/>
+        <a href="https://technologynova.org/%e6%b7%b1%e5%ba%a6%e5%89%96%e6%9e%90%ef%bc%9a%e5%a6%82%e4%bd%95%e8%ae%be%e8%ae%a1%e6%94%af%e6%8c%81%e6%a8%a1%e6%8b%9f%e4%ba%a4%e6%98%93%e7%9a%84%e9%ab%98%e4%bf%9d%e7%9c%9f%e5%bd%b1%e5%ad%90%e6%92%ae/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>

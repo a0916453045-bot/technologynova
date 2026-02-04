@@ -1,0 +1,10 @@
+[
+  {
+    "id": "0001",
+    "date": "2026-02-04",
+    "title": "深度剖析：如何设计支持模拟交易的高保真影子撮合引擎",
+    "original_url": "https://technologynova.org/%e6%b7%b1%e5%ba%a6%e5%89%96%e6%9e%90%ef%bc%9a%e5%a6%82%e4%bd%95%e8%ae%be%e8%ae%a1%e6%94%af%e6%8c%81%e6%a8%a1%e6%8b%9f%e4%ba%a4%e6%98%93%e7%9a%84%e9%ab%98%e4%bf%9d%e7%9c%9f%e5%bd%b1%e5%ad%90%e6%92%ae/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": ["交易系统", "撮合引擎", "模拟交易", "影子撮合", "回测"]
+  }
+]
