@@ -18,6 +18,16 @@ posts_sorted = sorted(POSTS, key=lambda x: (x.get("date", ""), x.get("id", "")),
 
 # index.html
 items_html = []
+def short_label(url: str) -> str:
+    if not url:
+        return ""
+    # Prefer a short, readable label for very long URLs.
+    if "technologynova.org" in url:
+        return "technologynova.org/…"
+    if len(url) <= 60:
+        return url
+    return url[:57] + "…"
+
 for p in posts_sorted:
     pid = p["id"]
     purl = f"p/{pid}/"
@@ -32,8 +42,8 @@ for p in posts_sorted:
         <div class=\"card\">
           <div class=\"meta\">{date} · <span class=\"badge\">{pid}</span></div>
           <h2 style=\"margin:6px 0 6px\"><a href=\"{purl}\">{title}</a></h2>
-          <div class=\"meta\">原文：<a href=\"{original}\" rel=\"nofollow\">{original}</a></div>
-          <div class=\"meta\">承接页：<a href=\"{landing}\" rel=\"nofollow\">{landing}</a></div>
+          <div class=\"meta\">原文：<a href=\"{original}\" rel=\"nofollow\" title=\"{original}\">{short_label(original)}</a></div>
+          <div class=\"meta\">承接页：<a href=\"{landing}\" rel=\"nofollow\" title=\"{landing}\">{short_label(landing)}</a></div>
           <div style=\"margin-top:10px\">{tags_html}</div>
         </div>
         """

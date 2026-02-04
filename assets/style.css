@@ -18,7 +18,7 @@ body{
 header{padding:10px 0 18px;border-bottom:1px solid var(--border);margin-bottom:18px}
 .brand{font-size:22px;font-weight:700;margin:0}
 .sub{margin:8px 0 0;color:var(--muted)}
-a{color:var(--brand);text-decoration:none}
+a{color:var(--brand);text-decoration:none;overflow-wrap:anywhere;word-break:break-word}
 a:hover{text-decoration:underline}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin:14px 0}
 .meta{color:var(--muted);font-size:14px}
