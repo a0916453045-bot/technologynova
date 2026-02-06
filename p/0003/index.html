@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>订单簿深度（Market Depth）推送：从全量快照到增量 Diff 的工程化落地（摘要） | TechNova</title>
+  <meta name="description" content="深度数据是交易系统里最凶的‘数据洪流’：高频、海量、强一致性要求。想要低延迟+低带宽+高一致性，核心是 Snapshot + Diff（增量更新）+ Sequence（序列号）+ 客户端合并与重同步。本文为 TechNova 原文的中文摘要与工程要点整理。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0003/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-06 · <span class="badge">0003</span></p>
+      <h1 class="brand" style="margin-top:8px">订单簿深度推送：从全量快照到增量 Diff 的工程化落地（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e4%bb%8e%e5%8d%83%e4%b8%87%e7%ba%a7%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%ef%bc%8c%e8%b0%88%e8%ae%a2%e5%8d%95%e7%b0%bf%e6%b7%b1%e5%ba%a6%e6%95%b0%e6%8d%ae%e7%9a%84%e7%94%9f%e6%88%90%e4%b8%8e%e6%8e%a8/">从千万级撮合引擎，谈订单簿深度数据的生成与推送优化实践</a>
+      </p>
+      <p class="sub">承接页（交易系统解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>别用“定时全量快照 JSON 广播”硬怼深度流：<b>带宽爆炸 + 客户端渲染崩 + 数据陈旧</b>。</li>
+        <li>正确姿势是 <b>Snapshot（基准快照） + Diff（增量更新）</b>：把成本从 O(N) 降到 O(K)。</li>
+        <li>为一致性必须引入 <b>Sequence Number</b>：客户端发现序列号不连续就触发<b>重同步</b>，否则状态会永久污染。</li>
+        <li>工程优化重点：<b>推绝对量而不是 delta</b>、<b>短窗口批处理</b>、<b>多级深度聚合</b>、必要时上<b>二进制协议</b>。</li>
+      </ul>
+    </div>
+
+    <h2>1. 问题为什么会爆：全量快照推送的三宗罪</h2>
+    <ul class="list">
+      <li><b>网络带宽爆炸</b>：100 档深度快照 5–10KB，10Hz × 1 万订阅 = 约 1GB/s 级别的出向带宽（还没算 TLS/WebSocket 额外开销）。</li>
+      <li><b>客户端性能瓶颈</b>：频繁 JSON 反序列化 + 全量重绘，导致 UI 卡顿、发热、耗电。</li>
+      <li><b>无效更新/数据陈旧</b>：两次快照之间往往只变了少数价位，但你每次都把 99% 的重复数据发出去。</li>
+    </ul>
+
+    <h2>2. 核心范式：Snapshot + Diff（增量更新）</h2>
+    <div class="card">
+      <p>
+        把客户端订单簿当作服务器订单簿的一个副本（Replica）。
+        第一次给客户端一份快照（Snapshot）作为基准；之后只推送发生变化的价位（Diff/Updates）。
+        这样网络与客户端计算成本从“深度档位数 N”变成“本次变化档位数 K”。
+      </p>
+      <p class="meta">关键建议：Diff 里推<b>绝对数量（最新总量）</b>，而不是“变化量”。绝对量是幂等的，鲁棒性更强。</p>
+    </div>
+
+    <h2>3. 一致性保障：序列号（Sequence）与重同步（Resync）</h2>
+    <p>
+      增量更新引入了“丢包/断线”风险。解决方法是给每个快照与每个增量更新打上严格递增的序列号。
+      客户端每次收到更新，校验 <code>prevSequence == localSequence</code>：
+      如果不连续，立即丢弃本地状态并重新请求快照（重同步），避免错误状态持续扩散。
+    </p>
+
+    <h2>4. 推荐架构：撮合事件 → 深度聚合 → 推送网关</h2>
+    <div class="card">
+      <ol class="list">
+        <li><b>撮合引擎</b>：唯一真相源，输出原子事件（下单/撤单/成交）。</li>
+        <li><b>事件总线</b>：保证有序消费（通常按交易对分区）。</li>
+        <li><b>深度聚合服务（有状态）</b>：重建完整订单簿，生成 Snapshot/Diff，并维护 Sequence。</li>
+        <li><b>推送网关（无状态）</b>：维护海量 WebSocket 连接，按订阅关系扇出（fan-out）。</li>
+      </ol>
+    </div>
+
+    <h2>5. 性能优化抓手（落地清单）</h2>
+    <ul class="list">
+      <li><b>短窗口批处理</b>：10–50ms 合并多个价位变更，减少小包与协议开销（延迟换吞吐）。</li>
+      <li><b>多级深度聚合</b>：按精度/档位分层（例如 0.1/1.0 价格粒度），让“普通用户”订阅更轻的流。</li>
+      <li><b>二进制协议</b>：当 JSON 成为瓶颈，用 Protobuf/MessagePack 或自定义定长结构压缩 50%+。</li>
+      <li><b>无状态网关</b>：网关挂了就重连 + resync；状态都在聚合服务与序列号机制里。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">延伸阅读 / 合作</div>
+      <p>
+        如果你要搭建金融级行情与深度推送、撮合引擎与风控链路，可参考 TechNova 交易系统整体解决方案：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e4%bb%8e%e5%8d%83%e4%b8%87%e7%ba%a7%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%ef%bc%8c%e8%b0%88%e8%ae%a2%e5%8d%95%e7%b0%bf%e6%b7%b1%e5%ba%a6%e6%95%b0%e6%8d%ae%e7%9a%84%e7%94%9f%e6%88%90%e4%b8%8e%e6%8e%a8/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>
