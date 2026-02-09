@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>从原子性到执行风险：期权组合策略订单撮合引擎的设计深潜（摘要） | TechNova</title>
+  <meta name="description" content="组合策略单（Strategy Order）的核心难点不是“同时撮两条腿”，而是用工程手段把腿部风险（Legging Risk）压到可接受：要么全成、要么全不成；净价差要满足；流动性既可能来自策略簿也可能来自两条腿的独立订单簿。本文整理原文中关于原子性、确定性、事务式暂存/延迟发布、定序与HA的关键设计要点。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0006/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-09 · <span class="badge">0006</span></p>
+      <h1 class="brand" style="margin-top:8px">从原子性到执行风险：期权组合策略订单撮合引擎的设计深潜（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e4%bb%8e%e5%8e%9f%e5%ad%90%e6%80%a7%e5%88%b0%e6%89%a7%e8%a1%8c%e9%a3%8e%e9%99%a9%ef%bc%9a%e6%9c%9f%e6%9d%83%e7%bb%84%e5%90%88%e7%ad%96%e7%95%a5%e8%ae%a2%e5%8d%95%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e/">从原子性到执行风险：期权组合策略订单撮合引擎的设计深潜</a>
+      </p>
+      <p class="sub">承接页（交易系统解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>组合策略单（Strategy Order）最大的敌人是<b>腿部风险（Legging Risk）</b>：如果先成交腿 A、腿 B 却因为盘口跳价/流动性消失而失败，用户会瞬间暴露在“裸腿头寸”的巨大风险里。</li>
+        <li>撮合引擎要提供“事务语义”：<b>多腿原子性</b>（要么全成、要么全不成）+ <b>净价差约束</b>（Implied Net Price 必须满足限价）+ <b>公平/确定性</b>（同一输入流得到同一输出）。</li>
+        <li>实现上通常有两条路：<b>SOB vs SOB</b>（策略簿对策略簿撮合，简单但流动性薄）与 <b>SOB vs CLOB</b>（策略簿拆腿去两条腿的独立订单簿找流动性，复杂但更贴近真实市场）。</li>
+        <li>工程关键不是“写撮合逻辑”，而是把多腿操作做成<b>可回滚/可验证的状态变更序列</b>：延迟对外发布成交回报、暂存状态，失败则恢复；并用 Sequencer/输入日志/快照恢复把一致性闭环。</li>
+      </ul>
+    </div>
+
+    <h2>1. 先把问题讲清楚：为什么“组合下单”比你想的难</h2>
+    <p>
+      以牛市看涨价差（Bull Call Spread）为例：买入低行权价 Call（腿 A）+ 卖出高行权价 Call（腿 B）。交易者关心的是<b>净价差</b>（例如最多付 1.50 美元），而不是两条腿各自成交价。
+      如果系统只把它拆成两笔普通订单顺序执行，就会出现经典灾难：腿 A 成了、腿 B 失败——策略没了，只剩裸腿风险。
+    </p>
+    <ul class="list">
+      <li><b>原子性</b>：两条腿必须“同时”成交或同时失败。</li>
+      <li><b>价格约束</b>：腿的组合价格必须满足策略单的限价（净价差/净信用）。</li>
+      <li><b>流动性来源</b>：对手方可能是另一个反向策略单，也可能来自两条腿各自的订单簿（更常见）。</li>
+      <li><b>性能/公平</b>：在微秒级系统里做到这些，还要守住价格-时间优先与确定性。</li>
+    </ul>
+
+    <h2>2. 两种撮合模式：SOB vs SOB / SOB vs CLOB</h2>
+    <div class="card">
+      <div class="meta">模式 A：SOB vs SOB（策略簿内部撮合）</div>
+      <p>
+        对每类策略（垂直价差、跨式、蝶式…）维护一个策略订单簿（SOB），策略单之间直接按“净价”撮合。
+        好处是逻辑简单、天然原子；坏处是现实里策略簿流动性往往不足。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="meta">模式 B：SOB vs CLOB（拆腿去腿市场找流动性）</div>
+      <p>
+        引擎从两条腿各自的 CLOB 探测最优价（例如腿 A 看 Ask、腿 B 看 Bid），计算隐含净价（Implied Spread），满足限价则尝试执行。
+        难点在于：你必须把“探测 → 锁定/预留 → 执行 → 发布回报”做成一个原子序列，否则就会在中途被行情/撤单打断。
+      </p>
+    </div>
+
+    <h2>3. 关键要点/坑：你需要一个“内存事务”的工程等价物</h2>
+    <ul class="list">
+      <li><b>延迟发布（defer publish）</b>：撮合过程中不要立刻对外发送成交回报；先在内存里完成所有腿的状态变更，全部成功后再一次性发布。</li>
+      <li><b>状态暂存与恢复</b>：失败路径必须能把订单簿与订单对象恢复到撮合前的状态（否则就是“孤儿腿”事故）。这通常意味着在一次撮合函数调用内完成所有变更，失败就回滚本地修改。</li>
+      <li><b>同时间戳/同事件序列的确定性</b>：策略撮合和普通撮合共存时，要定义清晰的处理顺序；否则同一输入在不同机器/不同运行中结果可能漂移。</li>
+      <li><b>别把数据库 2PC 硬搬进来</b>：经典分布式事务的网络/锁开销对低延迟撮合是灾难。更常见的做法是把“强一致的变更范围”限制在单进程/单撮合分片内，用确定性状态机 + 输入日志解决恢复一致性。</li>
+    </ul>
+
+    <h2>4. 架构层面的落地路线（从能跑到跑得稳）</h2>
+    <ol class="list">
+      <li><b>MVP</b>：只做 SOB vs SOB，先跑通策略单生命周期与风控/清算/行情发布链路。</li>
+      <li><b>半自动拆腿服务</b>：用独立 Legging Engine 订阅策略簿深度，发现机会后同时发两笔 IOC 去腿市场，复杂性与风险先隔离在边上。</li>
+      <li><b>内置高性能拆腿</b>：把拆腿逻辑下沉到撮合核心，配合状态暂存/延迟发布实现原子；再做 CPU/缓存/内存池等性能工程。</li>
+      <li><b>更高阶的合成流动性</b>：用桥接合约/图算法把 A-vs-C 与 C-vs-B 合成 A-vs-B（技术与风险模型都很重，属于“卷王阶段”）。</li>
+    </ol>
+
+    <h2>5. 适用场景：什么时候你真的需要“策略撮合”</h2>
+    <ul class="list">
+      <li>你做的是期权/衍生品交易，需要对用户提供“组合下单”的执行保证；</li>
+      <li>你希望把“执行风险”从客户端/交易员身上，收敛回交易所/平台的系统能力；</li>
+      <li>你已经有成熟的定序、回放、快照恢复体系，能为复杂撮合提供确定性与可审计性。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        组合策略撮合牵扯到定序、撮合内核、风控清算、行情发布与 HA 恢复，是典型的“系统工程”。
+        如果你正在规划或升级交易系统（撮合/风控/清算/网关），建议从整体方案层面拆解落地：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e4%bb%8e%e5%8e%9f%e5%ad%90%e6%80%a7%e5%88%b0%e6%89%a7%e8%a1%8c%e9%a3%8e%e9%99%a9%ef%bc%9a%e6%9c%9f%e6%9d%83%e7%bb%84%e5%90%88%e7%ad%96%e7%95%a5%e8%ae%a2%e5%8d%95%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>

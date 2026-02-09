@@ -68,5 +68,21 @@
       "订单簿",
       "量化交易"
     ]
+  },
+  {
+    "id": "0006",
+    "date": "2026-02-09",
+    "title": "从原子性到执行风险：期权组合策略订单撮合引擎的设计深潜（摘要）",
+    "original_url": "https://technologynova.org/%e4%bb%8e%e5%8e%9f%e5%ad%90%e6%80%a7%e5%88%b0%e6%89%a7%e8%a1%8c%e9%a3%8e%e9%99%a9%ef%bc%9a%e6%9c%9f%e6%9d%83%e7%bb%84%e5%90%88%e7%ad%96%e7%95%a5%e8%ae%a2%e5%8d%95%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "期权",
+      "衍生品",
+      "组合策略",
+      "策略单",
+      "撮合引擎",
+      "原子性",
+      "腿部风险"
+    ]
   }
 ]
