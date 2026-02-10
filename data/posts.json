@@ -84,5 +84,20 @@
       "原子性",
       "腿部风险"
     ]
+  },
+  {
+    "id": "0007",
+    "date": "2026-02-10",
+    "title": "gRPC流式API在实时行情推送中的架构设计与实现（摘要）",
+    "original_url": "https://technologynova.org/grpc%e6%b5%81%e5%bc%8fapi%e5%9c%a8%e5%ae%9e%e6%97%b6%e8%a1%8c%e6%83%85%e6%8e%a8%e9%80%81%e4%b8%ad%e7%9a%84%e6%9e%b6%e6%9e%84%e8%ae%be%e8%ae%a1%e4%b8%8e%e5%ae%9e%e7%8e%b0/",
+    "landing_url": "https://technologynova.org/products/",
+    "tags": [
+      "gRPC",
+      "HTTP/2",
+      "实时行情",
+      "流式",
+      "Protobuf",
+      "网关"
+    ]
   }
 ]
