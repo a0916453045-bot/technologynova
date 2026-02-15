@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>基于事件溯源的撮合引擎状态重建与容灾设计（摘要） | TechNova</title>
+  <meta name="description" content="撮合引擎订单簿常驻内存换取微秒级延迟，但崩溃/重启会瞬间丢状态。本文提炼事件溯源 + WAL + 快照/重放的恢复方案：序列器保证全局顺序，事件日志可回放，快照缩短 RTO，并给出常见工程坑与演进路径。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0009/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-15 · <span class="badge">0009</span></p>
+      <h1 class="brand" style="margin-top:8px">基于事件溯源的撮合引擎状态重建与容灾设计（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e5%9f%ba%e4%ba%8e%e4%ba%8b%e4%bb%b6%e6%ba%af%e6%ba%90%e7%9a%84%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%8a%b6%e6%80%81%e9%87%8d%e5%bb%ba%e4%b8%8e%e5%ae%b9%e7%81%be%e8%ae%be%e8%ae%a1/">基于事件溯源的撮合引擎状态重建与容灾设计</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>撮合引擎为追求低延迟，核心状态（订单簿/挂单/撮合指针）通常常驻内存；但内存易失，崩溃/断电/重启会把状态“清零”。</li>
+        <li>把撮合引擎建模为<b>确定性状态机</b>：只要有严格有序的事件流（下单/撤单/成交等），就能通过<b>重放</b>恢复到同一状态。</li>
+        <li>工程上用<b>事件溯源 + 预写日志（WAL）</b>保证 RPO≈0：先把事件持久化，再更新内存订单簿。</li>
+        <li>用<b>快照 + 增量重放</b>缩短 RTO：加载最近一次快照，然后从快照序列号之后开始回放事件，避免“从创世重放”。</li>
+      </ul>
+    </div>
+
+    <h2>1. 问题本质：性能要内存，可靠性要持久化</h2>
+    <p>
+      交易系统的撮合核心之所以快，是因为它把订单簿（Order Book）当成内存数据结构来操作。
+      但这也意味着：一旦进程崩溃、机器断电、甚至一次计划内重启，订单簿瞬间丢失。
+    </p>
+    <p>
+      直觉解法是“每次状态变更都同步写数据库”，但这会把瓶颈从撮合逻辑转移到磁盘 I/O、事务与锁竞争上，吞吐从百万级掉到千级并不稀奇。
+      所以正确方向通常是：<b>撮合仍在内存跑，但持久化要做到不拖慢撮合</b>。
+    </p>
+
+    <h2>2. 核心思路：事件溯源（Event Sourcing）= 只存“发生过什么”</h2>
+    <div class="card">
+      <div class="meta">把状态“还原”为事件重放的结果</div>
+      <ul class="list">
+        <li>传统方式存“当前状态”（订单表字段）。</li>
+        <li>事件溯源存“状态变化的事实”（下单/撤单/成交事件序列）。</li>
+        <li>系统当前状态 = 从某个初始状态开始按序重放事件后的结果。</li>
+      </ul>
+    </div>
+    <p>
+      这套方法成立的关键前提是<b>确定性</b>：同一个初始状态 + 同一条严格有序的事件流 → 必然得到同一个最终订单簿。
+      也因此，“事件顺序”比事件内容更敏感。
+    </p>
+
+    <h2>3. 关键要点/坑：WAL 与全局序列号，缺一不可</h2>
+    <ul class="list">
+      <li><b>WAL（Write-Ahead Logging）</b>：更新内存前先持久化事件。否则崩溃在最尴尬的瞬间会出现“内存改了、日志没落盘”或相反，导致恢复不一致。</li>
+      <li><b>全局严格有序</b>：多网关/多线程接入时，必须有一个“序列器（Sequencer）”对事件分配单调递增的 Sequence ID，并以此作为重放顺序。</li>
+      <li><b>确认语义</b>：写入日志系统时 ack 级别会直接影响 RPO 与延迟。金融系统通常宁愿选择更强的确认（更低丢失风险），再通过网络/集群调优降低额外延迟。</li>
+      <li><b>幂等与去重</b>：现实世界会重试、会超时。事件里要有可去重的标识（例如 client_order_id / request_id），恢复/重放必须能正确处理重复输入。</li>
+    </ul>
+
+    <h2>4. 快照（Snapshot）：让恢复时间从“重放全部”降到“重放增量”</h2>
+    <p>
+      只有事件日志会遇到一个必然问题：日志无限增长，重放耗时越来越长。
+      快照的作用是定期把“某一时刻的完整订单簿状态”落盘（或写对象存储），恢复时：
+    </p>
+    <ul class="list">
+      <li>先加载最新快照（恢复到某个 sequence_id）；</li>
+      <li>再从 sequence_id+1 开始重放增量事件，追平到最新。</li>
+    </ul>
+    <p>
+      工程上需要重点关注：快照频率（RTO vs 运行开销）、快照一致性（不要拿到半更新状态）、以及快照存储介质的可靠性（本地 SSD vs 对象存储）。
+    </p>
+
+    <h2>5. 适用场景：什么时候值得上“事件溯源 + 快照/重放”</h2>
+    <ul class="list">
+      <li><b>低延迟 + 高吞吐</b>是硬指标，无法接受“同步写 DB”把撮合拖慢；</li>
+      <li>状态是可重放的确定性状态机（撮合、风控流水、账户变更等）；</li>
+      <li>业务对 RPO/RTO 有明确目标（例如 RPO≈0，RTO 秒级/毫秒级）；</li>
+      <li>需要为 HA/热备/异地容灾打基础：备机消费同一事件流即可保持近实时镜像。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        “事件溯源 + 快照/重放”能解决撮合引擎的可恢复性，但真正落地还会牵扯到序列器高可用、日志系统选型、风控/清算下游一致性、以及故障切换演练。
+        如果你在做交易系统整体规划/重构，可以从解决方案页快速对齐模块与演进路径：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e5%9f%ba%e4%ba%8e%e4%ba%8b%e4%bb%b6%e6%ba%af%e6%ba%90%e7%9a%84%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%8a%b6%e6%80%81%e9%87%8d%e5%bb%ba%e4%b8%8e%e5%ae%b9%e7%81%be%e8%ae%be%e8%ae%a1/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>
