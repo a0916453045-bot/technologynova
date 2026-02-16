@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>剖析C++撮合引擎性能之核：内存布局与缓存行优化（摘要） | TechNova</title>
+  <meta name="description" content="撮合引擎的P99抖动常不是算法，而是缓存未命中与伪共享。本文提炼CPU Cache/缓存行、对齐、冷热数据分离、AoS→SoA、alignas+padding、内存池、CPU亲和性与NUMA等关键手段，帮助把延迟从“等内存”拉回“跑指令”。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0010/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-16 · <span class="badge">0010</span></p>
+      <h1 class="brand" style="margin-top:8px">剖析C++撮合引擎性能之核：内存布局与缓存行优化（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e5%89%96%e6%9e%90c%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e6%80%a7%e8%83%bd%e4%b9%8b%e6%a0%b8%ef%bc%9a%e5%86%85%e5%ad%98%e5%b8%83%e5%b1%80%e4%b8%8e%e7%bc%93%e5%ad%98%e8%a1%8c%e4%bc%98%e5%8c%96/">剖析C++撮合引擎性能之核：内存布局与缓存行优化</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>撮合引擎的<strong>P99 抖动</strong>很多时候不是撮合算法，而是<strong>缓存未命中（Cache Miss）</strong>与<strong>多核一致性开销</strong>在作祟：CPU 大量时间在 “stall 等数据”。</li>
+        <li>从“面向对象”切到<strong>面向数据（Data-Oriented）</strong>：把高频字段做紧凑布局，冷热分离，尽量让一个缓存行里装的都是撮合热数据。</li>
+        <li>多线程/多分片场景下，优先排查<strong>伪共享（False Sharing）</strong>：用 <code>alignas(64)</code> + padding 让每个线程写的计数器/统计独占缓存行。</li>
+        <li>系统级调优同样关键：<strong>内存池</strong>减少 new/delete 抖动，<strong>CPU 亲和性</strong>减少迁核导致的缓存失效，<strong>NUMA 感知</strong>避免跨节点远程内存访问。</li>
+      </ul>
+    </div>
+
+    <h2>1. 你看到的现象：吞吐还行，但延迟“突然变差”</h2>
+    <p>
+      典型症状是：并发上去后平均延迟开始非线性增长，甚至在负载看似平稳时，P99 也会出现不规律的“毛刺”。Profiling 发现撮合逻辑本身并不吃 CPU，
+      但 <code>perf</code> 一看：<strong>stalled cycles</strong> 占比很高——CPU 不是在算，而是在等内存。
+    </p>
+
+    <h2>2. 关键原理：缓存行是物理单位，不是“变量”</h2>
+    <ul class="list">
+      <li><strong>缓存行（Cache Line）</strong>常见是 64B：读一个 <code>int</code>，CPU 往往把所在 64B 整块搬进 L1。</li>
+      <li><strong>空间/时间局部性</strong>决定命中率：你的数据布局越“紧凑、连续、可预测”，越容易命中。</li>
+      <li><strong>跨缓存行访问</strong>会把一次读变两次读；更糟的是，一旦穿透到 DRAM，代价可能是几百个 CPU 周期。</li>
+    </ul>
+
+    <h2>3. 最容易忽视的坑：伪共享（False Sharing）</h2>
+    <div class="card">
+      <div class="meta">一句话</div>
+      <p>
+        两个线程各写各的变量，但变量恰好落在同一个缓存行里，就会在一致性协议下互相“踢缓存”，
+        造成核间通信与无意义的 invalidation——看上去像锁竞争，实际上是缓存行在打架。
+      </p>
+    </div>
+    <p>
+      工程上的第一反应不是加锁，而是先把数据隔离：
+      对每线程统计/计数/水位线类字段，使用 <code>alignas(64)</code> 或 C++17 的 <code>hardware_destructive_interference_size</code>，
+      再用 padding 把结构体尺寸撑到缓存行整数倍。
+    </p>
+
+    <h2>4. 数据结构策略：冷热分离 + AoS → SoA（或至少“热字段紧凑化”）</h2>
+    <ul class="list">
+      <li><strong>反模式（AoS）</strong>：一个 <code>Order</code> 里塞几十个字段（user_id、timestamp、风控字段……），撮合时却只用 price/qty/side。每次加载都把冷数据带进缓存，污染缓存。</li>
+      <li><strong>推荐做法</strong>：把撮合热数据单独放（hot pool），冷数据另放（cold pool）。撮合遍历只碰 hot pool，缓存行更“值钱”。</li>
+      <li><strong>落地诀窍</strong>：先用基准测试确认“热字段集合”，再逐步拆；不要一开始就把工程复杂度拉满。</li>
+    </ul>
+
+    <h2>5. 系统级优化：让你写的“缓存友好代码”不被调度打烂</h2>
+    <ul class="list">
+      <li><strong>内存池（Memory Pool）</strong>：撮合里订单创建/销毁高频，直接 new/delete 会引入抖动与碎片，破坏局部性。预分配 + 复用能显著稳定延迟。</li>
+      <li><strong>CPU 亲和性（Affinity/Pinning）</strong>：线程迁核会导致 L1/L2 缓存瞬间作废，你前面做的布局优化等于白做。</li>
+      <li><strong>NUMA 感知</strong>：多路 CPU 机器上，跨 NUMA 节点访问远程内存会更慢；要尽量保证撮合线程与订单簿/订单池在同一节点。</li>
+    </ul>
+
+    <h2>6. 适用场景：什么时候这套“硬核内存优化”最值</h2>
+    <ul class="list">
+      <li>你关心的不是 QPS，而是<strong>微秒级延迟</strong>与<strong>尾延迟稳定性</strong>（P99/P999）。</li>
+      <li>系统在多核扩展时“越加核越不线性”，怀疑是缓存一致性/伪共享导致。</li>
+      <li><code>perf</code> / PMU 指标显示 cache-miss、stalled cycles、CPI 异常偏高。</li>
+      <li>撮合核心本身是确定性/单线程或分片模型，能明确界定“谁在写什么数据”。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        内存布局与缓存行优化是“把一台机器榨干”的关键步骤，但真正落地到交易系统还要综合考虑：
+        序列器/网关拓扑、撮合分片策略、行情发布链路、风控/清算一致性与容灾演练。
+        如果你在规划或重构交易系统，可以先从解决方案页对齐模块边界与演进路径：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e5%89%96%e6%9e%90c%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e6%80%a7%e8%83%bd%e4%b9%8b%e6%a0%b8%ef%bc%9a%e5%86%85%e5%ad%98%e5%b8%83%e5%b1%80%e4%b8%8e%e7%bc%93%e5%ad%98%e8%a1%8c%e4%bc%98%e5%8c%96/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>

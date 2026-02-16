@@ -128,5 +128,21 @@
       "容灾",
       "撮合引擎"
     ]
+  },
+  {
+    "id": "0010",
+    "date": "2026-02-16",
+    "title": "剖析C++撮合引擎性能之核：内存布局与缓存行优化（摘要）",
+    "original_url": "https://technologynova.org/%e5%89%96%e6%9e%90c%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e6%80%a7%e8%83%bd%e4%b9%8b%e6%a0%b8%ef%bc%9a%e5%86%85%e5%ad%98%e5%b8%83%e5%b1%80%e4%b8%8e%e7%bc%93%e5%ad%98%e8%a1%8c%e4%bc%98%e5%8c%96/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "C++",
+      "撮合引擎",
+      "性能优化",
+      "CPU Cache",
+      "缓存行",
+      "伪共享",
+      "内存布局"
+    ]
   }
 ]
