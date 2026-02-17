@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>撮合引擎中的精度之殇：从浮点数陷阱到定点数救赎（摘要） | TechNova</title>
+  <meta name="description" content="撮合/风控/清算链路里，float/double 的表示误差会被放大成匹配失败、账目不平与确定性丢失。本文提炼 IEEE754 的根因、BigDecimal 的性能代价、定点数（整数+缩放因子）的落地要点，以及溢出/舍入/先乘后除等工程坑。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0011/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-17 · <span class="badge">0011</span></p>
+      <h1 class="brand" style="margin-top:8px">撮合引擎中的精度之殇：从浮点数陷阱到定点数救赎（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e4%b8%ad%e7%9a%84%e7%b2%be%e5%ba%a6%e4%b9%8b%e6%ae%87%ef%bc%9a%e4%bb%8e%e6%b5%ae%e7%82%b9%e6%95%b0%e9%99%b7%e9%98%b1%e5%88%b0%e5%ae%9a%e7%82%b9%e6%95%b0%e6%95%91/">撮合引擎中的精度之殇：从浮点数陷阱到定点数救赎</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>在撮合/风控/清算的核心链路里，<strong>float/double 不只是“有点小误差”</strong>：误差会被放大成<strong>匹配失败</strong>、<strong>账目不平</strong>、以及主备回放时的<strong>确定性丢失</strong>。</li>
+        <li>工程底线：对外可以用字符串十进制；一旦进入系统内部，价格/数量/金额一律转成<strong>定点数（整数 + 缩放因子）</strong>或数据库 <code>DECIMAL</code>，并统一“度量衡”。</li>
+        <li><code>BigDecimal</code> 很安全，但在撮合热点路径会引入对象分配、GC 与缓存不友好；高吞吐场景更常用<strong>int64 定点数</strong>（并配套溢出与舍入策略）。</li>
+        <li>定点数落地最大的坑不是“写公式”，而是：<strong>乘法溢出</strong>、<strong>除法截断</strong>、<strong>先乘后除</strong>、以及<strong>跨模块缩放因子不一致</strong>。</li>
+      </ul>
+    </div>
+
+    <h2>1. 为什么这事会把系统搞“死”</h2>
+    <p>
+      在金融交易系统里，数值表示方式直接决定了：订单簿索引能不能命中、成交金额能不能对账、主备切换能不能严格一致。
+      经典示例是 <code>0.1 + 0.2</code> 输出 <code>0.30000000000000004</code>。这不是“打印格式问题”，而是 IEEE754 的二进制表示天然无法精确表达很多十进制小数。
+    </p>
+
+    <ul class="list">
+      <li><strong>匹配失败</strong>：订单簿以价格为关键索引时，<code>0.3</code> 与 <code>0.1+0.2</code> 的二进制表示不同，可能导致“看起来相等、实际上不等”。</li>
+      <li><strong>账目不平</strong>：乘法/加减累计误差会在高频交易中不断放大，最后清算出现“解释不清”的差额。</li>
+      <li><strong>确定性丢失</strong>：主备节点或不同 CPU/FPU 实现对浮点计算的细微差异，可能让回放后的状态分叉（灾难级）。</li>
+    </ul>
+
+    <h2>2. 根因：IEEE754 的“合理但不适合金融”</h2>
+    <p>
+      IEEE754 用<strong>符号位 + 指数 + 尾数</strong>表示浮点数，能覆盖很大范围，但尾数本质是二进制小数。
+      十进制里常见的 <code>0.1</code>、<code>0.2</code> 在二进制下是无限循环小数，只能用“最接近的可表示值”近似。
+      这意味着：误差从“存进去那一刻”就已经存在。
+    </p>
+
+    <h2>3. 两条路：BigDecimal/DECIMAL vs 定点数（Fixed-Point）</h2>
+
+    <h3>3.1 BigDecimal（或数据库 DECIMAL）：正确性优先，但不适合撮合热路径</h3>
+    <ul class="list">
+      <li>优点：十进制精确；舍入模式可控；对账/报表/清算更顺手。</li>
+      <li>代价：对象与大整数运算带来显著 CPU/内存开销；在撮合循环里容易把性能与尾延迟拖垮。</li>
+    </ul>
+
+    <h3>3.2 定点数：用整数承载价格与数量</h3>
+    <p>
+      核心思想：统一缩放因子（scale），把小数转成整数存储与计算。
+      例如价格保留 4 位：<code>price_int = price * 10^4</code>；数量保留 8 位：<code>qty_int = qty * 10^8</code>。
+      内部只做整数加减乘除（或在中间计算用更宽位宽），保证确定性与性能。
+    </p>
+
+    <div class="card">
+      <div class="meta">定点数落地 checklist（工程师版）</div>
+      <ul class="list">
+        <li><strong>统一度量衡</strong>：每个字段的 scale 必须有文档（或类型封装），禁止“凭感觉乘除”。</li>
+        <li><strong>先乘后除</strong>：避免整数除法过早截断（平均价、加权价这类尤其关键）。</li>
+        <li><strong>处理乘法溢出</strong>：<code>price_int * qty_int</code> 可能超出 int64；用 <code>__int128</code>（C++）、<code>BigInteger</code>（Java）或受控拆分方案做中间计算。</li>
+        <li><strong>舍入规则要“业务确定”</strong>：向下取整/银行家舍入/四舍五入必须统一，否则跨服务会对不上账。</li>
+        <li><strong>边界转换要严格</strong>：外部输入用字符串解析（不要先转 double），入口处立刻转定点；出口处再格式化为十进制。</li>
+      </ul>
+    </div>
+
+    <h2>4. 适用场景：什么时候“必须定点数”</h2>
+    <ul class="list">
+      <li>撮合引擎/订单簿/风险校验处于高吞吐热路径，需要 <strong>µs 级稳定尾延迟</strong>。</li>
+      <li>系统要求<strong>可回放、可审计、主备完全一致</strong>（事件溯源/日志回放）。</li>
+      <li>多资产、多精度并存，需要在架构层面建立统一的精度与舍入规范。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        精度只是“交易核心能不能活下去”的第一关。真正上线还要把：订单生命周期（OMS）、风控、撮合分片、行情发布、清算对账、容灾演练串起来。
+        如果你在规划/重构交易系统，建议先从解决方案页对齐模块边界与落地路径：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e4%b8%ad%e7%9a%84%e7%b2%be%e5%ba%a6%e4%b9%8b%e6%ae%87%ef%bc%9a%e4%bb%8e%e6%b5%ae%e7%82%b9%e6%95%b0%e9%99%b7%e9%98%b1%e5%88%b0%e5%ae%9a%e7%82%b9%e6%95%b0%e6%95%91/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>
