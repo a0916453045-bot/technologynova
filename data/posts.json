@@ -159,5 +159,21 @@
       "清算",
       "确定性"
     ]
+  },
+  {
+    "id": "0012",
+    "date": "2026-02-18",
+    "title": "论高保真模拟交易：影子撮合引擎的设计与实现（摘要）",
+    "original_url": "https://technologynova.org/%e8%ae%ba%e9%ab%98%e4%bf%9d%e7%9c%9f%e6%a8%a1%e6%8b%9f%e4%ba%a4%e6%98%93%ef%bc%9a%e5%bd%b1%e5%ad%90%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%9a%84%e8%ae%be%e8%ae%a1%e4%b8%8e%e5%ae%9e%e7%8e%b0/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "模拟交易",
+      "影子撮合",
+      "撮合引擎",
+      "Kafka",
+      "隔离",
+      "回测",
+      "灰度验证"
+    ]
   }
 ]
