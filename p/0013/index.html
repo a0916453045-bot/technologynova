@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>从数值溢出到资产安全：深度剖析撮合引擎的防御性编程与架构设计（摘要） | TechNova</title>
+  <meta name="description" content="撮合引擎里最致命的“安全洞”往往不是黑客，而是整数溢出/浮点精度与语言未定义行为带来的资金校验失效。本文提炼溢出根因、关键边界、SafeMath/Decimal落地与“入口校验→风控→撮合→清算→对账”纵深防线。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0013/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-19 · <span class="badge">0013</span></p>
+      <h1 class="brand" style="margin-top:8px">从数值溢出到资产安全：深度剖析撮合引擎的防御性编程与架构设计（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e4%bb%8e%e6%95%b0%e5%80%bc%e6%ba%a2%e5%87%ba%e5%88%b0%e8%b5%84%e4%ba%a7%e5%ae%89%e5%85%a8%ef%bc%9a%e6%b7%b1%e5%ba%a6%e5%89%96%e6%9e%90%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%9a%84%e9%98%b2%e5%be%a1/">从数值溢出到资产安全：深度剖析撮合引擎的防御性编程与架构设计</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>在撮合/风控/清算链路里，<strong>整数溢出</strong>会把“需要冻结一大笔钱”的计算绕回成小数甚至负数，直接导致<strong>资金校验失效</strong>、错误撮合、账本错乱。</li>
+        <li>别指望“多写几个 if 就行”：C/C++ 的有符号溢出可能触发 <strong>UB（未定义行为）</strong>，编译器甚至会把你的边界检查优化掉；Go/Java 虽然行为确定（环绕），但业务上仍然是坑。</li>
+        <li>工程上要做的是纵深防御：<strong>入口范围校验 → 风控安全计算 → 撮合核心数值抽象 → 数据库类型兜底 → 独立审计对账</strong>，并把溢出当成“安全漏洞”来治理。</li>
+        <li>性能与安全可折中：热点路径用 <strong>checked/safemath</strong> + 严格范围证明；非实时路径（清结算/审计）可用 <strong>Decimal/big.Int</strong> 换取确定性与正确性。</li>
+      </ul>
+    </div>
+
+    <h2>1. 问题到底有多严重：溢出不是 Bug，是“资产安全洞”</h2>
+    <p>
+      交易系统里最可怕的一类事故，是“看起来只是数值计算出错”，但后果却是资金冻结/扣款/记账全部偏离。
+      溢出一旦把一个正数绕回成负数，就可能出现“买单反而不占用资金”的荒诞结果。
+      从结果看，它等价于：绕过风控 + 伪造成交成本 + 污染账本。
+    </p>
+
+    <div class="card">
+      <div class="meta">关键要点 / 常见坑（工程视角）</div>
+      <ul class="list">
+        <li><strong>中间值溢出比最终值更危险</strong>：最终结果可能还在范围内，但中间乘法/缩放（price * qty * scale）早就爆了。</li>
+        <li><strong>单位与精度没统一</strong>：价格用 10^-6，数量用 10^-8，路径里还混了“手动除回来”的逻辑；越写越像数学题，越容易踩边界。</li>
+        <li><strong>把 float 当钱算</strong>：不一定溢出，但会引入 IEEE 754 误差、NaN/Inf 传播；对账时你会被 0.1+0.2 教做人。</li>
+        <li><strong>C/C++ 的 UB</strong>：有符号溢出未定义，编译器可能基于“不会溢出”的假设优化逻辑；线上出错时你很难复盘。</li>
+        <li><strong>只修撮合不修风控/清算</strong>：入口放过一次，后面每一层都在“用错数做对账”，最后只能停机手工回滚。</li>
+      </ul>
+    </div>
+
+    <h2>2. 建议的纵深防线：把溢出治理贯穿整条链路</h2>
+    <p>
+      防溢出不该是散落的 if，而应当像安全工程一样分层：
+      入口层做“常识级”范围拒绝；风控层用安全算术计算冻结/保证金；
+      撮合核心用统一的定点/Decimal 类型封装钱与数量；
+      数据库用 DECIMAL/NUMERIC 做最后一道栅栏；
+      最后用独立审计对账服务做旁路复算，发现不一致就触发告警/熔断。
+    </p>
+
+    <h2>3. 数值类型选型：SafeMath / 定点 Decimal / big.Int 怎么用</h2>
+    <ul class="list">
+      <li><strong>SafeMath（checked add/mul）</strong>：对 int64 做显式溢出检测，适合撮合热点路径，性能代价可控，但需要明确业务上界与边界测试。</li>
+      <li><strong>定点 Decimal（int64 + precision）</strong>：统一钱/数量的表示（例如最小单位），避免 float；乘法后的 rescale/舍入策略要被当作业务规则写清楚。</li>
+      <li><strong>big.Int / 任意精度</strong>：几乎根治溢出，但会带来分配与 GC 压力；更适合清算、对账、审计等非纳秒敏感路径。</li>
+    </ul>
+
+    <h2>4. 适用场景：哪些团队现在就该把“溢出”拉到 P0</h2>
+    <ul class="list">
+      <li><strong>做撮合/风控/清算</strong>：任何涉及 price * qty、保证金、手续费、杠杆的地方都是高风险区。</li>
+      <li><strong>支持多资产/多精度</strong>：外汇 4-5 位小数、加密 8-18 位小数，精度混用时中间值最容易炸。</li>
+      <li><strong>从单体走向分布式</strong>：链路拉长后，错误会跨服务传播；没有对账旁路就等于“错了也不知道”。</li>
+      <li><strong>做灰度/热升级</strong>：老逻辑与新逻辑同时存在时，数值口径不一致会放大对账与回滚成本。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        如果你正在搭建或重构交易系统（撮合/风控/清算/对账/容灾），建议先把模块边界与口径统一，再谈性能微优化。
+        可以从 TechNova 的交易系统解决方案页对齐全链路设计：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e4%bb%8e%e6%95%b0%e5%80%bc%e6%ba%a2%e5%87%ba%e5%88%b0%e8%b5%84%e4%ba%a7%e5%ae%89%e5%85%a8%ef%bc%9a%e6%b7%b1%e5%ba%a6%e5%89%96%e6%9e%90%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%9a%84%e9%98%b2%e5%be%a1/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>
