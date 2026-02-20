@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>交易系统中的伪共享（False Sharing）陷阱与内核级优化剖析（摘要） | TechNova</title>
+  <meta name="description" content="多线程高频写入不同变量也可能把缓存行当成乒乓球来回打：伪共享会触发 MESI 失效风暴，吞吐不升反降。本文提炼定位方法与对齐/填充、@Contended、AoS→SoA 等可落地的根治思路。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0014/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-20 · <span class="badge">0014</span></p>
+      <h1 class="brand" style="margin-top:8px">交易系统中的伪共享（False Sharing）陷阱与内核级优化剖析（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e4%ba%a4%e6%98%93%e7%b3%bb%e7%bb%9f%e4%b8%ad%e7%9a%84%e4%bc%aa%e5%85%b1%e4%ba%abfalse-sharing%e9%99%b7%e9%98%b1%e4%b8%8e%e5%86%85%e6%a0%b8%e7%ba%a7%e4%bc%98%e5%8c%96%e5%89%96%e6%9e%90/">交易系统中的伪共享(False Sharing)陷阱与内核级优化剖析</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li><strong>伪共享</strong>不是“线程写同一个变量”，而是不同线程写不同变量却落在<strong>同一条 Cache Line（通常 64B）</strong>里，导致缓存一致性协议频繁失效/争用。</li>
+        <li>在撮合引擎、实时风控、行情聚合这类<strong>高频写</strong>路径中，伪共享会把缓存行在多核间来回“乒乓”，表现为<strong>核数越多吞吐越差</strong>、L3 争用/Cache Miss 飙升。</li>
+        <li>落地优化的核心是：让被不同线程高频写的字段<strong>物理上隔离</strong>（对齐/填充、拆结构、AoS→SoA），再用基准测试 + perf/PMC 计数器验证收益。</li>
+        <li>优化有 trade-off：填充会增加内存占用、降低缓存密度；因此只对热点做“精准手术”，不要全局无脑 padding。</li>
+      </ul>
+    </div>
+
+    <h2>1. 为什么“逻辑上独立”的计数器也会互相拖慢？</h2>
+    <p>
+      交易系统里常见的统计结构（买单数、卖单数、成交额等）看起来互不相关，线程 A/B/C 各写各的。
+      但 CPU 缓存是按<strong>缓存行</strong>搬运数据的：你写 8 字节，CPU 可能在缓存里拿的是 64 字节。
+      如果两个线程写的字段恰好位于同一缓存行，那么每次写入都可能触发 MESI 的 RFO（Request For Ownership），
+      让其他核的该行副本失效，缓存行被迫在核之间转移——这就是伪共享的成本来源。
+    </p>
+
+    <div class="card">
+      <div class="meta">关键要点 / 常见坑（工程视角）</div>
+      <ul class="list">
+        <li><strong>“加 volatile/加原子”不等于解决</strong>：它只改变可见性/原子性，不改变缓存行的物理布局；伪共享依然会发生（甚至更明显）。</li>
+        <li><strong>症状很像“锁争用”</strong>：吞吐下降、CPU 似乎很忙，但锁很少；perf 里 cache-misses、LLC-load-misses、互连流量异常高。</li>
+        <li><strong>结构体字段顺序会害人</strong>：两个热点计数器并排放在 struct 里，极易落到同一 cache line；多线程写时就开始“打乒乓”。</li>
+        <li><strong>填充会带来反噬</strong>：padding 把对象膨胀，数组遍历时缓存命中率下降；热点写隔离了，但读取密集的路径可能变慢。</li>
+        <li><strong>别盲猜缓存行大小</strong>：x86-64 常见是 64B，但不同平台/编译器布局不完全一致；要以实测与工具验证为准。</li>
+      </ul>
+    </div>
+
+    <h2>2. 定位路径：先用数据证明“是它”，再开刀</h2>
+    <ul class="list">
+      <li><strong>建立可复现 benchmark</strong>：模拟真实并发写入比例与数据分布（否则线上收益很容易对不上）。</li>
+      <li><strong>用 perf/性能计数器找信号</strong>：重点看 cache miss、LLC 争用、跨核同步相关事件；结合热点函数/热点数据结构定位。</li>
+      <li><strong>验证“拆开就好”</strong>：把两个字段临时分离到不同对象/不同数组，若吞吐明显回升，基本坐实伪共享。</li>
+    </ul>
+
+    <h2>3. 解决方案：从“对齐填充”到“数据结构重构”</h2>
+    <p>
+      目标只有一个：让不同线程高频写的变量不要共享同一缓存行。
+      常见落地方式可按侵入性从低到高排列：
+    </p>
+    <ul class="list">
+      <li><strong>C/C++：alignas(64) / 手动 padding</strong>：让关键字段独占 cache line（适合计数器、状态位等高频写小字段）。</li>
+      <li><strong>Java：@Contended</strong>（需 JVM 参数启用）：由 JVM 负责在字段周围插入填充，避免手写 padding 污染业务结构。</li>
+      <li><strong>AoS → SoA</strong>：把“结构体数组”改为“数组结构体”，让线程按列写入，天然隔离写热点；同时也更利于 SIMD/批处理。</li>
+      <li><strong>封装抽象</strong>：用 CacheLineAligned<T> 之类小工具把对齐细节收口，避免全项目散落“丑 padding”。</li>
+    </ul>
+
+    <h2>4. 适用场景：哪些团队值得立刻排查伪共享</h2>
+    <ul class="list">
+      <li><strong>撮合引擎 / 实时风控 / 行情聚合</strong>：高频更新计数器、盘口状态、聚合指标的路径。</li>
+      <li><strong>多核扩展不线性</strong>：从 8 核到 16 核吞吐提升很小甚至下降，但业务锁不明显。</li>
+      <li><strong>低延迟追到“纳秒级尾部”</strong>：平均值还行，但 tail latency 居高不下，且与并发写热点强相关。</li>
+    </ul>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        伪共享属于“代码看不出来、压测才暴露”的硬件层性能坑。
+        如果你正在做交易系统的性能压榨（撮合/风控/数据管线/低延迟架构），建议把<strong>缓存行布局、并发写隔离、基准测试体系</strong>一起纳入架构评审。
+        可以从 TechNova 的交易系统解决方案页了解全链路落地方式：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e4%ba%a4%e6%98%93%e7%b3%bb%e7%bb%9f%e4%b8%ad%e7%9a%84%e4%bc%aa%e5%85%b1%e4%ba%abfalse-sharing%e9%99%b7%e9%98%b1%e4%b8%8e%e5%86%85%e6%a0%b8%e7%ba%a7%e4%bc%98%e5%8c%96%e5%89%96%e6%9e%90/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>
