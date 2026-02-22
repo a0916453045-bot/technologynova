@@ -222,5 +222,22 @@
       "Raft",
       "高可用"
     ]
+  },
+  {
+    "id": "0016",
+    "date": "2026-02-22",
+    "title": "基于 Intel Optane 的低延迟撮合引擎状态持久化架构深度剖析（摘要）",
+    "original_url": "https://technologynova.org/%e5%9f%ba%e4%ba%8e-intel-optane-%e7%9a%84%e4%bd%8e%e5%bb%b6%e8%bf%9f%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%8a%b6%e6%80%81%e6%8c%81%e4%b9%85%e5%8c%96%e6%9e%b6%e6%9e%84%e6%b7%b1%e5%ba%a6%e5%89%96/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "撮合引擎",
+      "持久内存",
+      "PMEM",
+      "Intel Optane",
+      "状态持久化",
+      "低延迟",
+      "RPO",
+      "RTO"
+    ]
   }
 ]
