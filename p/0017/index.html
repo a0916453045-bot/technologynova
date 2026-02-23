@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>从 μs 到 ns：用 AVX/SIMD 向量化撮合引擎热路径（摘要） | TechNova</title>
+  <meta name="description" content="当撮合循环已榨干应用层优化，瓶颈往往变成 cache miss、分支预测失败与迭代依赖。把订单簿从指针结构改成对齐的 SoA 连续数组，再用 AVX2 一次比较/扫描 4 个价格并用位掩码处理匹配，可把热路径从 SISD 推向 SIMD 的数据并行，显著压低 tail latency。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0017/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-23 · <span class="badge">0017</span></p>
+      <h1 class="brand" style="margin-top:8px">从 μs 到 ns：用 AVX/SIMD 向量化撮合引擎热路径（摘要）</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e4%bb%8e%ce%bcs%e5%88%b0ns%ef%bc%9a%e5%9f%ba%e4%ba%8eavx%e6%8c%87%e4%bb%a4%e9%9b%86%e7%9a%84%e6%ac%a1%e4%b8%96%e4%bb%a3%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e5%90%91%e9%87%8f%e5%8c%96%e9%9d%a9/">从μs到ns：基于AVX指令集的次世代撮合引擎向量化革命</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>撮合引擎在高负载下最常见的死法不是“算法不够快”，而是<strong>内存与分支</strong>：指针结构导致 cache miss，热循环的条件判断导致分支预测频繁失败，尾延迟被拉爆。</li>
+        <li>想吃到 SIMD 的红利，第一步不是写 intrinsic，而是把订单簿改成<strong>物理连续 + 可对齐</strong>的数据布局：用 <strong>SoA（Struct of Arrays）</strong>把 <code>prices/qty/ids</code> 分开存放，确保能一次加载多笔价格进向量寄存器。</li>
+        <li>AVX2 的典型套路：<strong>广播 taker 价格 → 一次加载 4 个价格 → 向量比较 → movemask 得到位掩码</strong>，再用位运算快速找出匹配的档位并执行成交更新。</li>
+        <li>向量化不是银弹：代码复杂度、可移植性（x86 vs ARM）、以及“插入/撤单”在有序数组里的搬移成本，都需要配套的工程策略兜底。</li>
+      </ul>
+    </div>
+
+    <h2>1) 为什么传统撮合循环会卡在微秒级？</h2>
+    <p>
+      典型撮合是“遍历订单簿 → 判断是否价格可成交 → 计算成交量 → 更新状态”。当订单簿深度很大（上千/上万档）时，热路径会被三类问题持续骚扰：
+    </p>
+    <ul class="list">
+      <li><strong>Cache miss</strong>：红黑树/跳表/链式结构遍历是指针跳转，空间局部性差，L1/L2 很难命中。</li>
+      <li><strong>分支预测失败</strong>：<code>if (price_match)</code> 的结果对 CPU 来说并不“可预测”，流水线频繁被冲刷。</li>
+      <li><strong>迭代依赖</strong>：每次撮合都会改数量、删节点，限制乱序执行与指令级并行。</li>
+    </ul>
+    <p>
+      如果你已经做过对象池、避免频繁分配、把部分结构改成数组、把序列器与撮合单线程绑定等“常规低延迟套路”，那下一步通常就是：别再幻想 SISD 能带来数量级收益，改用数据并行（SIMD）。
+    </p>
+
+    <div class="card">
+      <div class="meta">关键要点 / 常见坑（工程视角）</div>
+      <ul class="list">
+        <li><strong>先写 AVX，后改数据结构</strong>：大概率徒劳。SIMD 的前提是数据在内存里连续可批量加载。</li>
+        <li><strong>只看均值不看 P99/P999</strong>：撮合系统“慢”往往体现在 tail latency，分支预测与 cache miss 会放大尾部抖动。</li>
+        <li><strong>对齐没做实</strong>：地址不对齐会被迫用 unaligned load，收益打折；更糟的是不小心踩到未对齐导致额外开销。</li>
+        <li><strong>把向量比较当成“完整撮合”</strong>：比较能向量化，但成交更新/生成回报/簿维护通常仍是标量逻辑，需要分层设计。</li>
+      </ul>
+    </div>
+
+    <h2>2) SIMD/AVX 真正解决的是什么问题？</h2>
+    <p>
+      SIMD（Single Instruction, Multiple Data）做的事很朴素：<strong>用一条指令对多个数据执行同一操作</strong>。
+      在 AVX2 下，一个 256-bit 寄存器可以同时放 4 个 <code>double</code> 价格；一条比较指令就能一次算出 4 个“是否可成交”。
+    </p>
+    <p>
+      更关键的是：把“每次循环一个 if”变成“每批 4 个结果的位掩码”，能显著减少分支与循环次数，把热路径更像是在做“批处理扫描”，
+      CPU 的前端（取指/分支/流水）压力更小。
+    </p>
+
+    <h2>3) 让订单簿 SIMD-Ready：AoS → SoA + 对齐</h2>
+    <p>
+      原文强调了一个很现实的结论：树/链表是 SIMD 的天敌。要向量化，你需要把核心数据改成能连续加载的布局。
+      两种常见布局：
+    </p>
+    <ul class="list">
+      <li><strong>AoS</strong>：<code>Order{price,qty}</code> 的数组。写起来舒服，但想一次加载 4 个 price 时，内存并非连续（夹着 qty 等字段）。</li>
+      <li><strong>SoA</strong>：<code>prices[]</code>、<code>qtys[]</code>、<code>ids[]</code> 分开存。此时 4 个 price 在内存里紧挨着，适合 <code>_mm256_load_pd</code>。</li>
+    </ul>
+    <p>
+      同时要注意对齐（AVX2 典型是 32 字节对齐）。工程上通常会使用 <code>alignas</code> + 对齐分配器来保证 vector 的底层地址满足要求。
+    </p>
+
+    <h2>4) 向量化撮合循环：比较向量化，更新用掩码驱动</h2>
+    <p>
+      向量化版本的核心步骤可以概括为：
+    </p>
+    <ol class="list">
+      <li>把 taker 价格广播到向量寄存器（4 个 lane 都是同一个价格）。</li>
+      <li>一次加载 4 个 maker 价格。</li>
+      <li>做向量比较（<= 或 >=，取决于买/卖方向）。</li>
+      <li>用 <code>movemask</code> 把比较结果变成整数 bitmask（例如 <code>0b0111</code> 表示前 3 个匹配）。</li>
+      <li>基于 bitmask 逐个处理匹配项：计算成交量、更新数量、生成回报；若 mask 为 0 且订单簿有序，可提前退出。</li>
+    </ol>
+    <p>
+      这个结构的好处是：把“可并行的比较”交给 SIMD，剩下“必须串行的状态更新”由掩码驱动。
+      你不会得到 100% 的 4 倍加速，但通常能在热路径上明显降低比较与分支开销，尤其对 P99 很友好。
+    </p>
+
+    <div class="card">
+      <div class="meta">适用场景</div>
+      <ul class="list">
+        <li><strong>延迟极度敏感</strong>：高频交易、做市、数字货币交易所等，撮合是“心脏”。</li>
+        <li><strong>单核瓶颈明显</strong>：吞吐到每秒数百万笔，传统逐笔循环已经顶到天花板。</li>
+        <li><strong>能接受特化与复杂度</strong>：愿意为关键路径写更底层的实现，并有足够的测试/基准体系兜底。</li>
+        <li><strong>平台以 x86 为主</strong>：AVX 依赖指令集；若需要 ARM 兼容，需要准备 NEON/SVE 版本或回退路径。</li>
+      </ul>
+    </div>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        如果你的撮合引擎已经做完“应用层常规优化”，但 P99/P999 仍被 cache miss 与分支拖累，可以按“三段式”评审落地路线：
+        1) 先把订单簿改成连续内存布局（数组/分块/SoA）；
+        2) 再把最热的比较/扫描环节向量化（AVX2/AVX-512）；
+        3) 最后用基准与回归测试守住正确性与尾延迟。
+        更系统的落地路径与架构咨询可参考：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e4%bb%8e%ce%bcs%e5%88%b0ns%ef%bc%9a%e5%9f%ba%e4%ba%8eavx%e6%8c%87%e4%bb%a4%e9%9b%86%e7%9a%84%e6%ac%a1%e4%b8%96%e4%bb%a3%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e5%90%91%e9%87%8f%e5%8c%96%e9%9d%a9/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>

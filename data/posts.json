@@ -239,5 +239,20 @@
       "RPO",
       "RTO"
     ]
+  },
+  {
+    "id": "0017",
+    "date": "2026-02-23",
+    "title": "从 μs 到 ns：用 AVX/SIMD 向量化撮合引擎热路径（摘要）",
+    "original_url": "https://technologynova.org/%e4%bb%8e%ce%bcs%e5%88%b0ns%ef%bc%9a%e5%9f%ba%e4%ba%8eavx%e6%8c%87%e4%bb%a4%e9%9b%86%e7%9a%84%e6%ac%a1%e4%b8%96%e4%bb%a3%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e5%90%91%e9%87%8f%e5%8c%96%e9%9d%a9/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "撮合引擎",
+      "低延迟",
+      "SIMD",
+      "AVX",
+      "向量化",
+      "高频交易"
+    ]
   }
 ]
