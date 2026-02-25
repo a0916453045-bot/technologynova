@@ -270,5 +270,20 @@
       "一致性",
       "订单簿"
     ]
+  },
+  {
+    "id": "0019",
+    "date": "2026-02-25",
+    "title": "终极Bug复现：深入剖析撮合引擎的确定性重放架构（摘要）",
+    "original_url": "https://technologynova.org/%e7%bb%88%e6%9e%81bug%e5%a4%8d%e7%8e%b0%ef%bc%9a%e6%b7%b1%e5%85%a5%e5%89%96%e6%9e%90%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%9a%84%e7%a1%ae%e5%ae%9a%e6%80%a7%e9%87%8d%e6%94%be%e6%9e%b6%e6%9e%84/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "确定性重放",
+      "事件日志",
+      "快照",
+      "定序器",
+      "撮合引擎",
+      "调试"
+    ]
   }
 ]
