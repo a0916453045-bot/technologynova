@@ -285,5 +285,21 @@
       "撮合引擎",
       "调试"
     ]
+  },
+  {
+    "id": "0020",
+    "date": "2026-02-26",
+    "title": "解构高性能撮合引擎：基于 RingBuffer 的无锁请求排队机制深度剖析",
+    "original_url": "https://technologynova.org/%e8%a7%a3%e6%9e%84%e9%ab%98%e6%80%a7%e8%83%bd%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%ef%bc%9a%e5%9f%ba%e4%ba%8e-ringbuffer-%e7%9a%84%e6%97%a0%e9%94%81%e8%af%b7%e6%b1%82%e6%8e%92%e9%98%9f%e6%9c%ba/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "撮合引擎",
+      "RingBuffer",
+      "无锁",
+      "低延迟",
+      "CAS",
+      "背压",
+      "CPU缓存"
+    ]
   }
 ]
