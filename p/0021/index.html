@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>微秒必争：基于 RDMA 的超低延迟撮合引擎通信架构剖析 | TechNova</title>
+  <meta name="description" content="把撮合集群关键路径从 TCP/IP 协议栈里“救出来”：用 RDMA 的 Kernel Bypass + Zero-Copy 让节点间通信逼近微秒级，并重点优化定序器→撮合分发与主备状态复制两条生命线。" />
+  <link rel="canonical" href="https://insights.technologynova.org/p/0021/" />
+  <link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <p class="meta"><a href="../../">← 返回索引</a> · 2026-02-27 · <span class="badge">0021</span></p>
+      <h1 class="brand" style="margin-top:8px">微秒必争：基于 RDMA 的超低延迟撮合引擎通信架构剖析</h1>
+      <p class="sub">原文首发于 TechNova：
+        <a href="https://technologynova.org/%e5%be%ae%e7%a7%92%e5%bf%85%e4%ba%89%ef%bc%9a%e5%9f%ba%e4%ba%8erdma%e7%9a%84%e8%b6%85%e4%bd%8e%e5%bb%b6%e8%bf%9f%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e9%80%9a%e4%bf%a1%e6%9e%b6%e6%9e%84%e5%89%96/">微秒必争：基于RDMA的超低延迟撮合引擎通信架构剖析</a>
+      </p>
+      <p class="sub">承接页（解决方案）：<a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a></p>
+    </header>
+
+    <div class="card">
+      <div class="meta">TL;DR</div>
+      <ul class="list">
+        <li>撮合系统的端到端预算往往只有 <strong>~100μs</strong>；但 TCP/IP（Socket）每跳常见就吃掉 <strong>20–50μs</strong>，原因主要不是“网线慢”，而是<strong>内核网络栈</strong>的拷贝、syscall、协议处理与中断带来的固定开销和不确定性。</li>
+        <li>RDMA 的两把刀：<strong>Kernel Bypass</strong>（数据路径不走内核）+ <strong>Zero-Copy</strong>（网卡直接从/向用户态内存 DMA），让节点间通信更接近“内存语义”。</li>
+        <li>落地优先级别搞反会失败：不要一上来“全链路 RDMA”。先抓最值钱的两条链路：<strong>定序器→撮合引擎的订单分发</strong>，以及<strong>撮合主→备的状态复制</strong>（经典对口：RDMA Write）。</li>
+        <li>RDMA 不是银弹：你会用“成本/复杂度”换“微秒级确定性”。要为<strong>内存注册</strong>、<strong>CPU 绑核忙轮询</strong>、<strong>无损网络（RoCE）配置</strong>和<strong>应用层容错</strong>付出工程代价。</li>
+      </ul>
+    </div>
+
+    <h2>1) 为什么 TCP/IP 在撮合关键路径上总像一堵墙？</h2>
+    <p>
+      在交易系统里，“网络延迟”的大头经常来自操作系统：
+      用户态 buffer 需要拷贝到内核 Socket buffer，协议栈要跑 TCP 状态机/校验/分段，
+      还会触发 syscall、上下文切换与中断处理。
+      这些开销不仅贵，而且带来抖动（尾延迟），会把撮合引擎原本可预测的热路径打碎。
+    </p>
+
+    <div class="card">
+      <div class="meta">关键要点 / 常见坑（工程视角）</div>
+      <ul class="list">
+        <li><strong>只盯“带宽”不盯“延迟构成”</strong>：10/25/100GbE 解决不了 syscall/协议栈/拷贝的固定成本；低延迟先算预算，再看每一跳的“可解释时间”。</li>
+        <li><strong>把 TCP 调参当成终局</strong>：Nagle、IRQ Affinity、busy poll、SO_REUSEPORT…能优化，但对微秒级目标通常只是“缓解”，不是“破局”。</li>
+        <li><strong>误把“平均延迟”当 KPI</strong>：撮合更关心 P99/P999；内核中断与调度抖动常常体现在尾部。</li>
+      </ul>
+    </div>
+
+    <h2>2) RDMA 的核心：绕开内核，直达内存</h2>
+    <p>
+      RDMA（Remote Direct Memory Access）的目标是让数据从发送方用户态内存到接收方用户态内存，
+      尽量少让 CPU/内核参与。
+      常见的 Verbs 组件包括：<strong>QP（Queue Pair）</strong>、<strong>CQ（Completion Queue）</strong>、以及<strong>内存注册（MR）</strong>。
+      在极致低延迟场景里，CQ 通常采用<strong>专用核忙轮询</strong>，用 100% CPU 换走中断/唤醒的不可预测成本。
+    </p>
+
+    <h2>3) 架构改造抓“生命线”：分发 + 主备复制</h2>
+    <p>
+      比较务实的切入方式是把外部接入层（面向大量连接、跨公网）继续留在 TCP；
+      把撮合集群内部两条关键路径换成 RDMA：
+    </p>
+    <ul class="list">
+      <li><strong>定序器 → 撮合引擎</strong>：用 Send/Receive 做高效消息通道，减少每笔订单在网络层的固定开销。</li>
+      <li><strong>撮合主 → 备</strong>：用 <strong>RDMA Write</strong> 做状态日志复制；远端 CPU 几乎不介入，天然适配“同步复制决定交易延迟”的场景。</li>
+    </ul>
+
+    <div class="card">
+      <div class="meta">落地时最容易踩的几个坑</div>
+      <ul class="list">
+        <li><strong>运行时频繁 ibv_reg_mr</strong>：内存注册会 pin 物理页，开销可达微秒级；正确做法是<strong>启动时预分配 + 预注册内存池</strong>，运行期只做指针切分/复用。</li>
+        <li><strong>RoCE 没配成“无损以太网”</strong>：PFC/ECN/队列与拥塞配置缺失，会导致丢包 → 性能断崖式下跌，定位成本高；InfiniBand 更可预测但设备成本更高。</li>
+        <li><strong>把“RDMA 可靠连接 = 系统可靠”</strong>：RC 只保证链路语义，节点宕机/分区/重连仍要应用层做日志、重放与状态恢复。</li>
+        <li><strong>忽略流控</strong>：One-sided Write 很快，但如果发送端不做节制，可能把接收端内存写爆；需要 credit/水位/批处理等手段。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="meta">适用场景</div>
+      <ul class="list">
+        <li><strong>HFT/交易所撮合内核</strong>：对“每微秒都值钱”的业务，愿意为确定性投入硬件与工程复杂度。</li>
+        <li><strong>主备同步复制成为延迟瓶颈</strong>：复制延迟直接叠加到每笔交易；RDMA Write 往往能显著压缩这段成本。</li>
+        <li><strong>同机房/同可用区的低延迟 RPC/消息总线</strong>：当 gRPC/Kafka 的跳数与内核成本不可接受时，RDMA 更对口。</li>
+      </ul>
+    </div>
+
+    <hr />
+    <div class="card">
+      <div class="meta">承接页 CTA</div>
+      <p>
+        如果你正在做撮合/风控/行情链路的“微秒级优化”，建议先把问题拆成两类：
+        <strong>确定性（尾延迟）</strong>与<strong>吞吐</strong>。
+        RDMA 更擅长解决的是“把内核不确定性从关键路径拿掉”。
+        一条稳健的路线是：先做<strong>基准测试 + 小规模 PoC</strong>，再从<strong>主备复制</strong>这类点对点链路单点突破，最后再考虑扩展到核心消息总线。
+        更系统的交易系统整体方案：
+        <a href="https://technologynova.org/solution/">https://technologynova.org/solution/</a>
+      </p>
+      <p class="meta">原文链接：<br/>
+        <a href="https://technologynova.org/%e5%be%ae%e7%a7%92%e5%bf%85%e4%ba%89%ef%bc%9a%e5%9f%ba%e4%ba%8erdma%e7%9a%84%e8%b6%85%e4%bd%8e%e5%bb%b6%e8%bf%9f%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e9%80%9a%e4%bf%a1%e6%9e%b6%e6%9e%84%e5%89%96/">https://technologynova.org/…/</a>
+      </p>
+    </div>
+
+    <div class="footer">
+      <div>本页为中文摘要与工程要点整理，非原文全文；原文版权归 TechNova 所有。</div>
+    </div>
+  </div>
+</body>
+</html>
