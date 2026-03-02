@@ -332,5 +332,20 @@
       "最终一致性",
       "自动化修复"
     ]
+  },
+  {
+    "id": "0023",
+    "date": "2026-03-02",
+    "title": "深入撮合引擎：指令流水线（Pipelining）设计的原理与实践",
+    "original_url": "https://technologynova.org/%e6%b7%b1%e5%85%a5%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%ef%bc%9a%e6%8c%87%e4%bb%a4%e6%b5%81%e6%b0%b4%e7%ba%bf%ef%bc%88pipelining%ef%bc%89%e8%ae%be%e8%ae%a1%e7%9a%84%e5%8e%9f%e7%90%86%e4%b8%8e%e5%ae%9e/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "撮合引擎",
+      "流水线",
+      "定序器",
+      "RingBuffer",
+      "并发",
+      "低延迟"
+    ]
   }
 ]
