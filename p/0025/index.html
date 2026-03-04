@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>设计支持灰度升级的撮合引擎热重启方案 - TechNova Insights</title>
+    <meta name="description" content="深入探讨高频交易系统中撮合引擎的热重启与灰度升级架构设计，涵盖共享内存、文件描述符传递及分片灰度策略。">
+    <link rel="canonical" href="https://insights.technologynova.org/p/0025/">
+    <link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><a href="../../">TechNova Insights</a></h1>
+            <p>金融交易系统架构与性能优化深潜</p>
+        </header>
+        <article>
+            <h1>设计支持灰度升级的撮合引擎热重启方案</h1>
+            <p class="meta">发布日期：2026-03-04 | 编号：0025</p>
+            
+            <section class="tldr">
+                <h2>TL;DR</h2>
+                <p>针对极致性能的纯内存撮合架构，传统的停机升级会导致服务中断与状态丢失。本文提出基于操作系统底层机制（共享内存 + FD传递）的“热插拔”方案，实现毫秒级无损热重启，并结合分片架构演进至生产级灰度发布体系。</p>
+            </section>
+
+            <section class="key-points">
+                <h2>关键要点与工程坑点</h2>
+                <ul>
+                    <li><strong>核心机制：</strong>利用 <code>Shared Memory</code> (shm_open/mmap) 跨进程保留订单簿状态，通过 <code>Unix Domain Socket</code> (SCM_RIGHTS) 传递 TCP 文件描述符，确保连接不断开。</li>
+                    <li><strong>内存布局挑战：</strong>共享内存中严禁使用裸指针（虚拟地址随 ASLR 变化），必须采用<strong>基于偏移的指针 (Offset-based Pointers)</strong> 和 POD 数据结构。</li>
+                    <li><strong>同步开销：</strong>跨进程锁（pthread_mutex）需开启 <code>PTHREAD_PROCESS_SHARED</code> 属性，否则无法实现多进程安全。</li>
+                    <li><strong>优雅交接：</strong>Supervisor 进程协调新旧 Worker，通过紧凑的 IPC 协议在毫秒窗口内完成接管，依靠内核 TCP 缓冲区暂存在途数据。</li>
+                </ul>
+            </section>
+
+            <section class="scenarios">
+                <h2>适用场景</h2>
+                <ul>
+                    <li><strong>7x24 连续交易：</strong>如数字货币交易所或跨时区全球证券交易平台。</li>
+                    <li><strong>硬态系统升级：</strong>状态极其沉重（GB 级内存订单簿）、无法忍受从磁盘快照加载耗时的核心网元。</li>
+                    <li><strong>高频生产环境：</strong>需要通过“金丝雀分片”验证新逻辑（如新订单类型）而不影响全局市场的场景。</li>
+                </ul>
+            </section>
+
+            <section class="cta">
+                <h2>进一步探索</h2>
+                <p>构建稳健的低延迟交易系统不仅需要热重启，还涉及全链路的容量规划与容灾设计。您可以查看我们的 <a href="https://technologynova.org/solution/">交易系统整体解决方案</a> 获取更多深度架构建议。</p>
+            </section>
+
+            <section class="original">
+                <p>原文链接：<a href="https://technologynova.org/%e8%ae%be%e8%ae%a1%e6%94%af%e6%8c%81%e7%81%b0%e5%ba%a6%e5%8d%87%e7%ba%a7%e7%9a%84%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e7%83%ad%e9%87%8d%e5%90%af%e6%96%b9%e6%a1%88/" target="_blank" rel="noopener">设计支持灰度升级的撮合引擎热重启方案 - TechNova</a></p>
+            </section>
+        </article>
+        <footer>
+            <p>&copy; 2026 TechNova Insights. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>
