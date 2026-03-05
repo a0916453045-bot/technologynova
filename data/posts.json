@@ -377,5 +377,22 @@
       "文件描述符传递",
       "低延迟"
     ]
+  },
+  {
+    "id": "0026",
+    "date": "2026-03-05",
+    "title": "撮合引擎高可用架构：从冷热备到毫秒级无感切换",
+    "original_url": "https://technologynova.org/%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e9%ab%98%e5%8f%af%e7%94%a8%e6%9e%b6%e6%9e%84%ef%bc%9a%e4%bb%8e%e5%86%b7%e7%83%ad%e5%a4%87%e4%bb%bd%e5%88%b0%e6%af%ab%e7%a7%92%e7%ba%a7%e6%97%a0%e6%84%9f%e5%88%87/",
+    "landing_url": "https://technologynova.org/solution/",
+    "tags": [
+      "撮合引擎",
+      "高可用",
+      "RPO/RTO",
+      "复制状态机",
+      "Raft",
+      "共识算法",
+      "脑裂",
+      "容灾"
+    ]
   }
 ]

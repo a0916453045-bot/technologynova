@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>撮合引擎高可用架构：从冷热备到毫秒级无感切换 - TechNova Insights</title>
+    <meta name="description" content="面向金融级交易系统，梳理撮合引擎高可用的演进路径：冷热备、日志重放到基于复制状态机+Raft 的热备自动切换；重点讲清零 RPO、毫秒级 RTO 及脑裂防护的工程权衡。">
+    <link rel="canonical" href="https://insights.technologynova.org/p/0026/">
+    <link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><a href="../../">TechNova Insights</a></h1>
+            <p>金融交易系统架构与性能优化深潜</p>
+        </header>
+        <article>
+            <h1>撮合引擎高可用架构：从冷热备到毫秒级无感切换</h1>
+            <p class="meta">发布日期：2026-03-05 | 编号：0026</p>
+            
+            <section class="tldr">
+                <h2>TL;DR</h2>
+                <p>撮合引擎是<strong>有状态</strong>的内存系统：要做到“无感切换”，核心不是复制一份内存快照，而是把引擎抽象成<strong>确定性状态机</strong>，通过<strong>复制指令日志</strong>（复制状态机/RSM）让主备保持同一条事实来源；再用 <strong>Raft/Paxos</strong> 这类共识算法保证日志顺序一致，并配合<strong>租约/任期（term）+ fencing</strong> 解决脑裂，才能同时逼近<strong>RPO=0</strong> 与<strong>毫秒级 RTO</strong>。</p>
+            </section>
+
+            <section class="key-points">
+                <h2>关键要点与工程坑点</h2>
+                <ul>
+                    <li><strong>先把问题讲清：</strong>撮合引擎的状态是订单簿快照；HA 指标里，交易系统通常要求 <strong>RPO=0</strong>（不丢单/不丢成交）与极低 <strong>RTO</strong>（故障切换毫秒～亚秒）。传统“数据库主从复制”很难兼顾两者。</li>
+                    <li><strong>复制状态机（RSM）才是正解：</strong>不要试图持续复制整份订单簿内存，而是复制“产生状态的指令序列”（下单/撤单等）。<strong>只要指令顺序完全一致，状态就必然一致</strong>——日志因此成为 Single Source of Truth。</li>
+                    <li><strong>确定性是硬前提：</strong>撮合主循环必须可重放、可验证。常见踩坑包括：用系统时间/随机数参与逻辑、遍历无序 HashMap 导致迭代顺序漂移、多线程并发引入不可控调度差异。工程上通常选择<strong>单线程串行应用日志</strong>来换确定性与可测试性。</li>
+                    <li><strong>共识保证“同一条日志”：</strong>以 Raft 为例：Leader 排序写入复制日志，只有复制到多数派（quorum）才算 committed；这对应<strong>强同步复制</strong>，换来零数据丢失，但写延迟会被 RTT 拉高（尤其跨机房）。</li>
+                    <li><strong>脑裂比宕机更可怕：</strong>误判故障触发双主会造成不可逆的不一致。常见做法是<strong>租约（lease）+ 自我降级（self-fencing）</strong>，并辅以<strong>任期/epoch</strong>：任何携带旧 term 的请求/消息都必须被拒绝。</li>
+                    <li><strong>演进路径要现实：</strong>从冷备（快照+手切）→ 温备（日志重放）→ 热备自动切换（协调器/共识+fencing）→ 分片/多活，是一条更可落地的路线；越往后复杂度越指数上升。</li>
+                </ul>
+            </section>
+
+            <section class="scenarios">
+                <h2>适用场景</h2>
+                <ul>
+                    <li><strong>交易所/券商核心撮合：</strong>7x24 运行、停机窗口极小，且对“绝不丢单”有硬要求的系统。</li>
+                    <li><strong>强一致低延迟的内存服务：</strong>除撮合外，任何可以抽象为确定性状态机的关键链路（风控决策、限额/仓位状态等）都能复用这套思路。</li>
+                    <li><strong>需要明确工程权衡的团队：</strong>愿意用同步复制换一致性，并能通过网络/部署距离/GC 调优等手段把延迟压下去。</li>
+                </ul>
+            </section>
+
+            <section class="cta">
+                <h2>进一步探索</h2>
+                <p>如果你在做交易系统的容灾与可用性设计，建议把“确定性状态机 + 共识日志 + fencing”作为主线来评审方案与排雷。更多端到端落地思路可查看我们的 <a href="https://technologynova.org/solution/">交易系统整体解决方案</a>。</p>
+            </section>
+
+            <section class="original">
+                <p>原文链接：<a href="https://technologynova.org/%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e9%ab%98%e5%8f%af%e7%94%a8%e6%9e%b6%e6%9e%84%ef%bc%9a%e4%bb%8e%e5%86%b7%e7%83%ad%e5%a4%87%e4%bb%bd%e5%88%b0%e6%af%ab%e7%a7%92%e7%ba%a7%e6%97%a0%e6%84%9f%e5%88%87/" target="_blank" rel="noopener">撮合引擎高可用架构：从冷热备份到毫秒级无感切换的实现与权衡 - TechNova</a></p>
+            </section>
+        </article>
+        <footer>
+            <p>&copy; 2026 TechNova Insights. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>
