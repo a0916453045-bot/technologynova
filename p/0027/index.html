@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AVX 指令集与 SIMD：撮合引擎热路径向量化实践（摘要） - TechNova Insights</title>
+    <meta name="description" content="面向超低延迟撮合引擎，讲清用 SIMD/AVX2 向量化“价格扫描/比较”热路径的关键：数据布局从 AoS→SoA、对齐与缓存行、movemask+ctz 去分支，以及何时值得用 intrinsics。">
+    <link rel="canonical" href="https://insights.technologynova.org/p/0027/">
+    <link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><a href="../../">TechNova Insights</a></h1>
+            <p>金融交易系统架构与性能优化深潜</p>
+        </header>
+        <article>
+            <h1>AVX指令集：将撮合引擎性能推向物理极限的向量化实践</h1>
+            <p class="meta">发布日期：2026-03-06 | 编号：0027</p>
+            
+            <section class="tldr">
+                <h2>TL;DR</h2>
+                <p>当撮合引擎已经把数据结构、无锁/单线程、内存池等“常规手段”榨到极致后，下一步往往不是再抠 O(logN)，而是<strong>把同一类比较/计算批量化</strong>：用 CPU 的 <strong>SIMD（SSE/AVX/AVX2/AVX-512）</strong> 一条指令并行处理多笔数据。要让 AVX 真正生效，核心不是写 intrinsics，而是先把订单簿热路径的数据布局改成<strong>连续、可对齐、可批量加载</strong>（AoS→SoA），再用<strong>movemask + 位运算</strong>把“比较→分支”的模式改成“比较→掩码→定位”，减少分支预测与流水线停顿。</p>
+            </section>
+
+            <section class="key-points">
+                <h2>关键要点与工程坑点</h2>
+                <ul>
+                    <li><strong>向量化最适合的热路径：</strong>撮合过程中大量重复的操作往往是“扫描对手盘价格档位并比较（&lt;= / &gt;=）”。这类操作结构稳定、分支少，最容易 SIMD 化。</li>
+                    <li><strong>先改数据布局再谈 AVX：</strong>链表/树（例如 std::map）节点离散，SIMD 的计算收益会被访存延迟抵消。优先把“价格数组、数量数组”等做成<strong>连续内存</strong>，典型范式：<strong>AoS → SoA</strong>（价格单独一个数组）。</li>
+                    <li><strong>缓存行与对齐不是细节，是门槛：</strong>CPU 以 64B cache line 为单位搬运数据；AVX2 一次 load 32B（256-bit）。对齐与连续性决定你能否做到高吞吐的 load/store；未对齐或跨 cache line 会显著掉速，甚至触发昂贵的 microcode 路径。</li>
+                    <li><strong>把“分支”改成“数据”：</strong>标量循环常见写法是 if (price &lt;= buy) break；SIMD 里更常用：比较得到 mask → movemask 提取比特 → 用 ctz/ffs 找到第一个命中的 lane，从而减少分支预测失误。</li>
+                    <li><strong>收益是“吞吐”而不是“魔法”：</strong>在数据能留在 L1/L2 的理想情况下，double 的 AVX2（4-lane）理论上能把比较吞吐提升接近 4 倍；但如果热数据被 cache miss 或出现 gather/散乱访问，收益会被吃掉。</li>
+                    <li><strong>复杂订单类型要谨慎：</strong>冰山单、FOK/IOC、组合策略腿（multi-leg）等会引入复杂分支。实践里通常只对<strong>最常见、最简单的限价单</strong>路径做 SIMD，复杂路径回退标量逻辑。</li>
+                    <li><strong>可移植性与回退路径：</strong>生产系统要做 CPU feature detect（是否支持 AVX2/AVX-512），并提供标量 fallback；同时锁定编译器/编译参数并做一致性回归测试，避免不同节点行为漂移。</li>
+                </ul>
+            </section>
+
+            <section class="scenarios">
+                <h2>适用场景</h2>
+                <ul>
+                    <li><strong>超低延迟撮合/风控热路径：</strong>当你已经确认瓶颈落在“批量比较/扫描”这类简单循环，并且系统处在纳秒级竞争。</li>
+                    <li><strong>高频行情/实时计算：</strong>同构的数值比较、过滤、归并等操作（尤其是连续数组上的扫描）也同样受益。</li>
+                    <li><strong>可控的数据结构：</strong>你能把热数据收敛为连续数组（SoA），而不是被第三方容器/复杂对象模型限制。</li>
+                </ul>
+            </section>
+
+            <section class="cta">
+                <h2>进一步探索</h2>
+                <p>如果你正在评估“要不要上 AVX”，建议用一套可复现的 micro-benchmark（固定数据规模、固定 CPU 频率/亲和、观测 LLC miss/分支失误）先把收益算清楚，再决定是否引入 intrinsics 技术债。更系统的交易系统设计与落地路径，可参考我们的 <a href="https://technologynova.org/solution/">交易系统整体解决方案</a>。</p>
+            </section>
+
+            <section class="original">
+                <p>原文链接：<a href="https://technologynova.org/avx%e6%8c%87%e4%bb%a4%e9%9b%86%ef%bc%9a%e5%b0%86%e6%92%ae%e5%90%88%e5%bc%95%e6%93%8e%e6%80%a7%e8%83%bd%e6%8e%a8%e5%90%91%e7%89%a9%e7%90%86%e6%9e%81%e9%99%90%e7%9a%84%e5%90%91%e9%87%8f%e5%8c%96/" target="_blank" rel="noopener">AVX指令集：将撮合引擎性能推向物理极限的向量化实践 - TechNova</a></p>
+            </section>
+        </article>
+        <footer>
+            <p>&copy; 2026 TechNova Insights. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>
