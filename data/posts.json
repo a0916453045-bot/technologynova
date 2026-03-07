@@ -409,5 +409,20 @@
       "CPU Cache",
       "内存对齐"
     ]
+  },
+  {
+    "id": "0028",
+    "date": "2026-03-07",
+    "title": "从 Terabytes 到 Milliseconds：构建金融级交易日志检索架构",
+    "original_url": "https://technologynova.org/%e4%bb%8e-terabytes-%e5%88%b0-milliseconds%ef%bc%9a%e6%9e%84%e5%bb%ba%e9%87%91%e8%9e%8d%e7%ba%a7%e4%ba%a4%e6%98%93%e6%97%a5%e5%bf%97%e6%a3%80%e7%b4%a2%e6%9e%b6%e6%9e%84/",
+    "landing_url": "https://technologynova.org/products/",
+    "tags": [
+      "日志检索",
+      "Elasticsearch",
+      "Kafka",
+      "Logstash",
+      "可观测性",
+      "架构设计"
+    ]
   }
 ]
