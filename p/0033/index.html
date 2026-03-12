@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从 T+1 到 T+0：证券交易系统清算结算分离的架构哲学与实战（摘要） - TechNova Insights</title>
+    <meta name="description" content="把清算/结算从在线交易链路剥离：用 CDC + Kafka 建数据管道，批处理做幂等可重入的日终结算，避免 OLAP 把 OLTP 拖死，并为 T+0/准实时结算铺路。">
+    <link rel="canonical" href="https://insights.technologynova.org/p/0033/">
+    <link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><a href="../../">TechNova Insights</a></h1>
+            <p>金融交易系统架构与性能优化深潜</p>
+        </header>
+        <article>
+            <h1>从 T+1 到 T+0：证券交易系统清算结算分离的架构哲学与实战（摘要）</h1>
+            <p class="meta">发布日期：2026-03-12 | 编号：0033</p>
+
+            <section class="tldr">
+                <h2>TL;DR</h2>
+                <p>很多交易系统的“祖传架构坑”是：<strong>交易 + 清算 + 结算</strong>共用一套数据库/资源池。白天是低延迟 OLTP（下单、成交、扣款），收盘后变成大吞吐 OLAP（全量扫描、聚合、批量更新）。两种负载混跑的结果通常是“收盘即卡顿”、锁等待飙升、Buffer Pool 被冲刷，最坏还会把第二天开市拖进事故里。更稳的做法是把<strong>清算结算从核心交易链路物理/逻辑分离</strong>：在线域只记录不可变的成交事实；通过 <strong>CDC → Kafka</strong> 可靠输送到清算域；清算引擎用<strong>批次 + 幂等 + 可重入</strong>方式结算，最后再演进到准实时甚至 T+0。</p>
+            </section>
+
+            <section class="key-points">
+                <h2>关键要点与工程坑点</h2>
+                <ul>
+                    <li><strong>本质矛盾是 OLTP vs OLAP：</strong>日终清结算是典型的“大扫描 + 复杂计算 + 海量更新”，和交易时段的低延迟事务完全不同；放在同一资源池里就是抢 CPU / I/O / 锁。</li>
+                    <li><strong>CAP 不是 PPT：</strong>交易链路更偏“可用性优先”（容忍一定最终一致）；清结算更偏“一致性优先”（账要对、可慢一点）。拆分边界能让两套系统按不同侧重点独立优化。</li>
+                    <li><strong>别双写，优先 CDC：</strong>应用双写会引入分布式事务与补偿复杂度；轮询延迟大、开销高。CDC 直接从 Binlog/RedoLog 捕获变更，侵入低、延迟小，但要关注 <code>DECIMAL</code> 金额精度、Schema 变更与重放语义。</li>
+                    <li><strong>清算引擎必须“幂等且可重入”：</strong>批处理跑一半挂了是常态。关键不是“别挂”，而是<strong>挂了也能安全重跑</strong>：用结算批次（如结算日）+ settlement_log/状态机，做到每一步最多执行一次。</li>
+                    <li><strong>对账是最后一道生命线：</strong>CDC/Kafka 再可靠，也要做日终总量/总额对账（资金总额、持仓市值等），把“默默错账”变成“立刻告警”。</li>
+                    <li><strong>影子模式切换更稳：</strong>先搭管道和新清算域，让新引擎跑数周“只写新库不影响线上”，持续比对结果；验证充分后再切换读写路径，避免一次性大爆炸。</li>
+                    <li><strong>演进到 T+0 的关键不是口号：</strong>有了准实时数据管道后，才能把“日终爆发式批处理”改造成流式/微批处理（Flink/Spark Streaming 等），逐步逼近准实时结算。</li>
+                </ul>
+            </section>
+
+            <section class="scenarios">
+                <h2>适用场景</h2>
+                <ul>
+                    <li><strong>券商/交易所后台重构：</strong>交易量增长导致“收盘即卡”或日终跑批频繁翻车，需要把清算结算从交易核心剥离。</li>
+                    <li><strong>引入 Kafka/CDC 的数据管道建设：</strong>希望用可回放的事件流连接在线域与后台域，实现削峰填谷与解耦。</li>
+                    <li><strong>迈向准实时资产展示：</strong>想在交易时段提供更接近实时的盈亏/持仓估算，并为 T+0 能力做长期铺垫。</li>
+                </ul>
+            </section>
+
+            <section class="cta">
+                <h2>承接页：清结算分离的“可落地”架构路线</h2>
+                <p>如果你正准备做交易后台的清算/结算分离，建议优先把边界与可靠性机制设计清楚：在线域只产生成交事实 → CDC 同步 → Kafka 缓冲与回放 → 清算域批次化幂等结算 → 日终对账与告警 → 影子模式验证后切换。可参考：<a href="https://technologynova.org/solution/">TechNova 交易系统整体解决方案</a>。</p>
+            </section>
+
+            <section class="original">
+                <p>原文链接：<a href="https://technologynova.org/%e4%bb%8e-t1-%e5%88%b0-t0%ef%bc%9a%e8%af%81%e5%88%b8%e4%ba%a4%e6%98%93%e7%b3%bb%e7%bb%9f%e6%b8%85%e7%ae%97%e7%bb%93%e7%ae%97%e5%88%86%e7%a6%bb%e7%9a%84%e6%9e%b6%e6%9e%84%e5%93%b2%e5%ad%a6%e4%b8%8e/" target="_blank" rel="noopener">从 T+1 到 T+0：证券交易系统清算结算分离的架构哲学与实战 - TechNova</a></p>
+            </section>
+        </article>
+        <footer>
+            <p>&copy; 2026 TechNova Insights. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>
